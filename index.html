@@ -13,7 +13,7 @@
     <!-- html2canvas and jspdf for PDF generation -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <!-- Firebase SDKs -->
+    <!-- Firebase SDKs (Required for loading the JS module for Canvas environment) -->
     <script type="module">
         // Import Firebase modules for Canvas Mode
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -75,19 +75,9 @@
             @apply flex justify-between items-center p-4 my-3 bg-white hover:bg-indigo-50 border border-gray-200 rounded-xl cursor-pointer transition-all duration-200 shadow-md;
         }
         
-        /* Overlay for runtime explanation */
-        #runtime-error-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: rgba(255, 255, 255, 0.95);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            text-align: center;
-            z-index: 100;
+        /* Status message for Local Mode */
+        #auth-status-local {
+             @apply text-lg font-extrabold text-green-700 p-3 bg-green-100 rounded-lg shadow-inner mb-6 flex items-center justify-center border-2 border-green-500;
         }
     </style>
 </head>
@@ -205,7 +195,12 @@
             <h2 class="text-3xl font-bold mb-6 text-indigo-800 flex items-center">
                 <i class="fas fa-folder-open mr-3"></i> My Universal Files
             </h2>
-            <p id="auth-status" class="text-sm text-indigo-500 mb-6 font-mono border-b pb-3 truncate">Connecting...</p>
+            
+            <!-- Dynamic Status Bar -->
+            <p id="auth-status-firebase" class="text-sm text-indigo-500 mb-6 font-mono border-b pb-3 truncate hidden">Connecting...</p>
+            <p id="auth-status-local" class="hidden">
+                 <i class="fas fa-lock text-green-700 mr-2"></i> **Local Mode Active:** Files are saved *only* in this browser.
+            </p>
             
             <div id="file-list" class="space-y-3">
                 <!-- Document list will be inserted here by JavaScript -->
@@ -246,8 +241,8 @@
         onAuthStateChanged, getFirestore, doc, deleteDoc, addDoc, setDoc, 
         onSnapshot, collection, query, orderBy;
 
-    const APP_ID_FALLBACK = 'default-app-id';
     const LOCAL_STORAGE_KEY = 'scriptoriam_documents_v1';
+    const FILENAME_PREFIX = "Scriptoriam Document - ";
     
     // Check for the presence of the required global variables for the secure Canvas environment
     const isCanvasEnvironment = 
@@ -256,14 +251,18 @@
         __firebase_config !== '{}' &&
         __firebase_config.length > 2;
 
-    let isLocalMode = false;
+    let isLocalMode = !isCanvasEnvironment; // Default to Local Mode if not in Canvas
     
-    const appId = isCanvasEnvironment ? __app_id : APP_ID_FALLBACK;
+    // Fallback constants used only if isCanvasEnvironment is true
+    const appId = isCanvasEnvironment ? __app_id : null;
     let firebaseConfig = {};
-    try {
-        firebaseConfig = isCanvasEnvironment ? JSON.parse(__firebase_config) : {};
-    } catch(e) {
-        console.error("Error parsing firebase config:", e);
+    if (isCanvasEnvironment) {
+        try {
+            firebaseConfig = JSON.parse(__firebase_config);
+        } catch(e) {
+            console.error("Error parsing firebase config. Falling back to Local Mode.", e);
+            isLocalMode = true; // Force local mode on config parse failure
+        }
     }
     const initialAuthToken = isCanvasEnvironment ? (typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null) : null;
     
@@ -305,6 +304,11 @@
             saveButton.classList.add('hidden');
             exportContainer.classList.add('hidden');
             backButton.classList.add('hidden');
+            
+            // Reload file list when switching back to files view
+            if (isLocalMode) {
+                startDocumentListenerLocal();
+            }
         }
 
         currentView = view;
@@ -349,6 +353,7 @@
         const text = editor.textContent.trim();
         
         const charCount = text.length;
+        // Simple regex to count words (non-whitespace groups)
         const wordCount = text ? text.split(/\s+/).filter(word => word.length > 0).length : 0;
         
         document.getElementById('word-count').textContent = `Words: ${wordCount}`;
@@ -358,13 +363,18 @@
     // --- DATA MANAGEMENT (Firebase Mode) ---
 
     async function initializeFirebase() {
+        if (!window.firebaseDependencies) {
+            console.error("Firebase dependencies not available. Forcing Local Mode.");
+            isLocalMode = true;
+            return;
+        }
+
         try {
             const app = initializeApp(firebaseConfig);
             db = getFirestore(app);
             auth = getAuth(app);
-            // setLogLevel('Debug'); // Enable for debugging Firestore
-
-            document.getElementById('auth-status').textContent = 'Authenticating...';
+            
+            document.getElementById('auth-status-firebase').textContent = 'Authenticating...';
 
             if (initialAuthToken) {
                 await signInWithCustomToken(auth, initialAuthToken);
@@ -375,20 +385,22 @@
             onAuthStateChanged(auth, (user) => {
                 if (user) {
                     userId = user.uid;
-                    document.getElementById('auth-status').innerHTML = `<i class="fas fa-database mr-1"></i> Firestore Active | User ID: ${userId}`;
+                    document.getElementById('auth-status-firebase').innerHTML = `<i class="fas fa-database mr-1"></i> Firestore Active | User ID: ${userId}`;
                     showStatus('Signed into secure data store.', 'bg-indigo-600');
                     startDocumentListenerFirebase();
                 } else {
                     userId = null;
-                    document.getElementById('auth-status').textContent = 'Not authenticated.';
+                    document.getElementById('auth-status-firebase').textContent = 'Not authenticated.';
                     showStatus('Authentication failed or user signed out.', 'bg-red-600');
                 }
             });
 
         } catch (error) {
             console.error("Firebase initialization failed:", error);
-            document.getElementById('auth-status').textContent = 'Error initializing Firebase.';
-            showStatus(`Firebase Error: ${error.message}`, 'bg-red-800');
+            document.getElementById('auth-status-firebase').textContent = 'Error initializing Firebase. Forcing Local Mode.';
+            isLocalMode = true; // Force local mode on any Firebase init failure
+            startDocumentListenerLocal();
+            showStatus(`Firebase Error: ${error.message}. Switched to Local Mode.`, 'bg-red-800');
         }
     }
 
@@ -434,7 +446,7 @@
         const editorContent = document.getElementById('document-editor').innerHTML;
         const editorTitle = document.getElementById('doc-title-input').value.trim() || "Untitled Document";
         
-        if (!userId) { return; } // Should not happen in Canvas Mode
+        if (!userId) { return false; }
 
         const docData = {
             title: editorTitle,
@@ -459,7 +471,7 @@
             currentDocTitle = editorTitle;
             return true; // Success
         } catch (error) {
-            console.error("Error saving document:", error);
+            console.error("Error saving document to Firebase:", error);
             return false; // Failure
         }
     }
@@ -469,16 +481,25 @@
     function getLocalDocuments() {
         try {
             const data = localStorage.getItem(LOCAL_STORAGE_KEY);
-            return data ? JSON.parse(data) : [];
+            return data ? JSON.parse(data).map(doc => ({
+                ...doc, 
+                updatedAt: new Date(doc.updatedAt) // Convert timestamp back to Date object
+            })) : [];
         } catch (e) {
             console.error("Error retrieving from localStorage:", e);
+            showStatus("Error retrieving local files. Storage may be full.", 'bg-red-700');
             return [];
         }
     }
 
     function saveLocalDocuments(documents) {
         try {
-            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(documents));
+            // Convert Date objects to strings for storage
+            const serializableDocs = documents.map(doc => ({
+                ...doc,
+                updatedAt: doc.updatedAt.toISOString()
+            }));
+            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(serializableDocs));
         } catch (e) {
             console.error("Error saving to localStorage:", e);
             showStatus("Local storage limit reached. Cannot save more data.", 'bg-red-700');
@@ -486,7 +507,11 @@
     }
 
     function startDocumentListenerLocal() {
-        // Local mode doesn't have a real-time snapshot listener, so we just load and render immediately.
+        // Show status bar for local mode
+        document.getElementById('auth-status-local').classList.remove('hidden');
+        document.getElementById('auth-status-firebase').classList.add('hidden');
+
+        // Load and render documents immediately
         const documents = getLocalDocuments();
         renderFileList(documents);
     }
@@ -496,7 +521,10 @@
         documents = documents.filter(doc => doc.id !== id);
         saveLocalDocuments(documents);
 
-        if (currentDocId === id) { newDocument(true); }
+        if (currentDocId === id) { 
+             // If we deleted the current open doc, start a new one
+             newDocument(true); 
+        }
         renderFileList(documents);
         showStatus(`Document "${title}" deleted from local storage.`, 'bg-red-600', 3000);
     }
@@ -506,21 +534,22 @@
         const editorTitle = document.getElementById('doc-title-input').value.trim() || "Untitled Document";
         let documents = getLocalDocuments();
 
-        const docData = {
-            id: currentDocId || crypto.randomUUID(),
+        const now = new Date();
+
+        let docData = {
+            id: currentDocId || crypto.randomUUID(), // Assign new ID if none exists
             title: editorTitle,
             content: editorContent,
-            updatedAt: new Date(), // Stored as Date object in local array
+            updatedAt: now, 
         };
         
         let success = false;
-        if (currentDocId) {
+        const existingIndex = documents.findIndex(d => d.id === currentDocId);
+
+        if (existingIndex !== -1) {
             // Update existing
-            const index = documents.findIndex(d => d.id === currentDocId);
-            if (index !== -1) {
-                documents[index] = docData;
-                success = true;
-            }
+            documents[existingIndex] = docData;
+            success = true;
         } else {
             // Create new
             documents.push(docData);
@@ -533,7 +562,7 @@
             documents.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
             saveLocalDocuments(documents);
             currentDocTitle = editorTitle;
-            renderFileList(documents); // Re-render to show updated time/position
+            renderFileList(documents); 
             return true;
         }
         return false;
@@ -554,9 +583,6 @@
                 <i class="fas fa-exclamation-circle mb-3 text-3xl"></i><br>
                 No saved documents yet. Click 'New' to start writing!
             </p>`;
-            if (!currentDocId && currentView === 'files') {
-                newDocument(false);
-            }
             return;
         }
 
@@ -564,13 +590,14 @@
             const item = document.createElement('div');
             item.className = 'file-item group';
             
-            // Format the updated time correctly for both Firestore Timestamp (Date type) and Local Mode (Date type)
+            // Format the updated time correctly
             const updatedTime = doc.updatedAt instanceof Date ? doc.updatedAt.toLocaleString() : (new Date()).toLocaleString();
 
             // Document name, updated time, and load handler
             const docInfo = document.createElement('div');
             docInfo.className = "flex-1 mr-4 truncate";
-            // The content must be passed as a string to loadDocument
+            
+            // Encode the content to ensure special characters don't break the loadDocument call
             const contentString = encodeURIComponent(doc.content);
 
             docInfo.innerHTML = `
@@ -672,7 +699,7 @@
             saveStatus.textContent = 'Save Failed!';
             saveStatus.classList.remove('text-yellow-600', 'text-green-600');
             saveStatus.classList.add('text-red-600');
-            showStatus(`Failed to save document. Check console.`, 'bg-red-700', 4000);
+            showStatus(`Failed to save document. Check console for details.`, 'bg-red-700', 4000);
         }
         
         saveButton.disabled = false;
@@ -690,23 +717,18 @@
      * Initializes the document editor and sets up event listeners.
      */
     function initializeScriptoriam() {
+        
         const dependencies = window.firebaseDependencies;
-        if (!dependencies) {
-            // If the module script failed to load dependencies (very rare), we force local mode.
-            isLocalMode = true;
-            console.warn("Firebase dependencies failed to load. Running in Local Mode.");
-        } else {
-             // Assign dependencies only if they loaded
+        if (isCanvasEnvironment && dependencies) {
+            // Assign dependencies for Firebase Mode
             ({ initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, deleteDoc, addDoc, setDoc, onSnapshot, collection, query, orderBy } = dependencies);
-        }
-
-
-        if (isCanvasEnvironment && !isLocalMode) {
-            initializeFirebase(); // Start in secure Firebase mode
+            document.getElementById('auth-status-firebase').classList.remove('hidden');
+            initializeFirebase(); 
         } else {
             // Start in Local Mode for external hosting (GitHub Pages)
             isLocalMode = true;
-            document.getElementById('auth-status').innerHTML = '<i class="fas fa-desktop text-green-500 mr-1"></i> **Local Mode Active** (Saved in Browser)';
+            document.getElementById('auth-status-local').classList.remove('hidden');
+            document.getElementById('auth-status-firebase').classList.add('hidden');
             startDocumentListenerLocal();
         }
 
@@ -756,8 +778,8 @@
         document.getElementById('export-menu').classList.add('hidden');
         const title = document.getElementById('doc-title-input').value || "Untitled_Document";
         
-        // **NEW: Prefix the filename**
-        const filenamePrefix = "Scriptoriam Document - ";
+        // Use the MANDATORY FILENAME_PREFIX constant
+        const filenamePrefix = FILENAME_PREFIX;
 
         switch (format) {
             case 'txt': exportAsTxt(title, filenamePrefix); break;
@@ -826,12 +848,13 @@
         const { jsPDF } = window.jspdf;
         const editor = document.getElementById('document-editor');
         
+        // Temporarily adjust padding for cleaner PDF generation
         const originalPadding = editor.style.padding;
         editor.style.padding = '50px'; 
 
         try {
             const canvas = await html2canvas(editor, { scale: 2, logging: false, useCORS: true });
-            editor.style.padding = originalPadding;
+            editor.style.padding = originalPadding; // Restore padding
 
             const imgData = canvas.toDataURL('image/png');
             const pdf = new jsPDF('p', 'mm', 'a4'); 
