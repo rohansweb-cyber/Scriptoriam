@@ -15,6 +15,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
     <!-- Firebase SDKs -->
     <script type="module">
+        // Import Firebase modules for Canvas Mode
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, deleteDoc, addDoc, setDoc, onSnapshot, collection, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -23,8 +24,8 @@
     
     <style>
         /* Custom font families for selection */
-        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&family=Georgia:wght@400;700&family=Playfair+Display:wght@400;700&display=swap');
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&family=Georgia:wght@400;700&family=Playfair+Display:wght@400;700&display=swap');
         
         /* Ensure body and main container take full height */
         html, body, #app-container { height: 100%; }
@@ -34,7 +35,7 @@
             min-height: 80vh;
             max-width: 8.5in; 
             margin: 2rem auto;
-            background-color: background: linear-gradient(to right, #e32f02, #1034ea);;
+            background-color: white;
             padding: 2rem; 
             box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
             line-height: 1.6;
@@ -72,6 +73,21 @@
         /* File Manager List Item style */
         .file-item {
             @apply flex justify-between items-center p-4 my-3 bg-white hover:bg-indigo-50 border border-gray-200 rounded-xl cursor-pointer transition-all duration-200 shadow-md;
+        }
+        
+        /* Overlay for runtime explanation */
+        #runtime-error-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.95);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 100;
         }
     </style>
 </head>
@@ -182,7 +198,7 @@
     </header>
 
     <!-- Main Content Area - View Container -->
-    <main class="flex-1 overflow-y-auto p-4 md:p-8">
+    <main class="flex-1 overflow-y-auto p-4 md:p-8 relative">
         
         <!-- 1. FILE MANAGER VIEW (Default View) -->
         <div id="file-manager-view" class="max-w-4xl mx-auto h-full p-4 md:p-8 bg-white rounded-2xl shadow-2xl">
@@ -195,6 +211,7 @@
                 <!-- Document list will be inserted here by JavaScript -->
                 <p class="text-gray-500 text-center py-4">Loading documents...</p>
             </div>
+            
         </div>
 
         <!-- 2. DOCUMENT EDITOR VIEW -->
@@ -225,21 +242,38 @@
 
 <script>
     // --- FIREBASE CONFIG & GLOBALS ---
-    // Declare all Firebase functions as 'let' globals for later assignment in initializeScriptoriam
     let initializeApp, getAuth, signInAnonymously, signInWithCustomToken, 
         onAuthStateChanged, getFirestore, doc, deleteDoc, addDoc, setDoc, 
         onSnapshot, collection, query, orderBy;
 
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-    const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-    const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+    const APP_ID_FALLBACK = 'default-app-id';
+    const LOCAL_STORAGE_KEY = 'scriptoriam_documents_v1';
+    
+    // Check for the presence of the required global variables for the secure Canvas environment
+    const isCanvasEnvironment = 
+        typeof __app_id !== 'undefined' && 
+        typeof __firebase_config !== 'undefined' &&
+        __firebase_config !== '{}' &&
+        __firebase_config.length > 2;
 
+    let isLocalMode = false;
+    
+    const appId = isCanvasEnvironment ? __app_id : APP_ID_FALLBACK;
+    let firebaseConfig = {};
+    try {
+        firebaseConfig = isCanvasEnvironment ? JSON.parse(__firebase_config) : {};
+    } catch(e) {
+        console.error("Error parsing firebase config:", e);
+    }
+    const initialAuthToken = isCanvasEnvironment ? (typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null) : null;
+    
     let db;
     let auth;
     let userId = null;
     let currentDocId = null;
     let currentDocTitle = "My New Document";
     let currentView = 'files'; // Tracks the current visible page: 'files' or 'editor'
+
 
     // --- VIEW MANAGEMENT ---
 
@@ -314,24 +348,16 @@
         const editor = document.getElementById('document-editor');
         const text = editor.textContent.trim();
         
-        // Count characters
         const charCount = text.length;
-        
-        // Count words (split by whitespace and filter out empty strings)
         const wordCount = text ? text.split(/\s+/).filter(word => word.length > 0).length : 0;
         
         document.getElementById('word-count').textContent = `Words: ${wordCount}`;
         document.getElementById('char-count').textContent = `Characters: ${charCount}`;
     }
 
-    // --- FIREBASE & DATA MANAGEMENT ---
+    // --- DATA MANAGEMENT (Firebase Mode) ---
 
-    /**
-     * Initializes Firebase and handles authentication.
-     */
     async function initializeFirebase() {
-        // NOTE: Firebase functions (initializeApp, etc.) are guaranteed to be defined here 
-        // because of the check in initializeScriptoriam.
         try {
             const app = initializeApp(firebaseConfig);
             db = getFirestore(app);
@@ -349,9 +375,9 @@
             onAuthStateChanged(auth, (user) => {
                 if (user) {
                     userId = user.uid;
-                    document.getElementById('auth-status').textContent = `User ID: ${userId}`;
-                    showStatus('Signed in successfully. Loading files.', 'bg-indigo-600');
-                    startDocumentListener();
+                    document.getElementById('auth-status').innerHTML = `<i class="fas fa-database mr-1"></i> Firestore Active | User ID: ${userId}`;
+                    showStatus('Signed into secure data store.', 'bg-indigo-600');
+                    startDocumentListenerFirebase();
                 } else {
                     userId = null;
                     document.getElementById('auth-status').textContent = 'Not authenticated.';
@@ -366,14 +392,10 @@
         }
     }
 
-    /**
-     * Starts listening to all documents for the current user.
-     */
-    function startDocumentListener() {
+    function startDocumentListenerFirebase() {
         if (!db || !userId) return;
 
         const path = `artifacts/${appId}/users/${userId}/documents`;
-        // Order documents by update time so the most recent ones appear first
         const q = query(collection(db, path), orderBy('updatedAt', 'desc'));
 
         onSnapshot(q, (snapshot) => {
@@ -383,97 +405,24 @@
                 documents.push({ 
                     id: doc.id, 
                     title: data.title,
-                    content: data.content,
-                    updatedAt: data.updatedAt 
+                    // Note: Firestore stores Timestamps, we convert to Date object here
+                    updatedAt: data.updatedAt ? data.updatedAt.toDate() : new Date(), 
+                    content: data.content 
                 });
             });
             renderFileList(documents);
-
-            // If a document is open, check if it was deleted (optional, relies on doc list refresh)
-            if (currentDocId && !documents.some(d => d.id === currentDocId) && currentView === 'editor') {
-                newDocument(true);
-            }
-
         }, (error) => {
             console.error("Error listening to documents:", error);
-            showStatus('Failed to load file list.', 'bg-red-500');
+            showStatus('Failed to load file list from Firestore.', 'bg-red-500');
         });
     }
 
-    /**
-     * Renders the list of documents in the File Manager View.
-     */
-    function renderFileList(documents) {
-        const list = document.getElementById('file-list');
-        list.innerHTML = '';
-        
-        if (documents.length === 0) {
-            list.innerHTML = `<p class="text-gray-500 text-center py-12 border border-dashed border-gray-300 rounded-xl">
-                <i class="fas fa-exclamation-circle mb-3 text-3xl"></i><br>
-                No saved documents yet. Click 'New' to start writing!
-            </p>`;
-            // If the user has no documents, automatically open a new one initially
-            if (!currentDocId) {
-                newDocument(false); // Do not clear content on initial load, but switch to editor
-            }
-            return;
-        }
-
-        documents.forEach(doc => {
-            const item = document.createElement('div');
-            item.className = 'file-item group';
-            
-            // Document name, updated time, and load handler
-            const docInfo = document.createElement('div');
-            docInfo.className = "flex-1 mr-4 truncate";
-            docInfo.innerHTML = `
-                <div onclick="loadDocument('${doc.id}', '${doc.title.replace(/'/g, "\\'")}', '${doc.content.replace(/'/g, "\\'")}')" class="font-bold text-lg text-indigo-700 hover:text-indigo-900 cursor-pointer">
-                    <i class="far fa-file-alt mr-2"></i> ${doc.title}
-                </div>
-                <div class="text-xs text-gray-500 mt-1">
-                    <i class="far fa-clock mr-1"></i> Updated: ${new Date(doc.updatedAt?.toDate()).toLocaleString()}
-                </div>
-            `;
-            item.appendChild(docInfo);
-
-            // Delete button
-            const deleteBtn = document.createElement('button');
-            deleteBtn.className = 'text-gray-400 hover:text-red-600 p-2 rounded-full transition-colors opacity-0 group-hover:opacity-100';
-            deleteBtn.innerHTML = '<i class="fas fa-trash-alt"></i>';
-            deleteBtn.title = `Delete ${doc.title}`;
-            deleteBtn.onclick = (e) => {
-                e.stopPropagation(); // Prevent loading the document when clicking delete
-                confirmDelete(doc.id, doc.title);
-            };
-            item.appendChild(deleteBtn);
-
-            list.appendChild(item);
-        });
-    }
-    
-    /**
-     * Deletes a document after confirmation.
-     */
-    function confirmDelete(id, title) {
-        // Simple confirmation modal/logic since window.confirm is forbidden
-        if (window.confirm(`Are you sure you want to delete the document: "${title}"? This cannot be undone.`)) {
-            deleteDocument(id, title);
-        }
-    }
-
-    async function deleteDocument(id, title) {
+    async function deleteDocumentFirebase(id, title) {
         if (!db || !userId) return;
-
         try {
             const docRef = doc(db, `artifacts/${appId}/users/${userId}/documents`, id);
             await deleteDoc(docRef);
-
-            // If the deleted document was the one currently open, open a new one and switch to files view
-            if (currentDocId === id) {
-                newDocument(true); 
-                switchView('files');
-            }
-
+            if (currentDocId === id) { newDocument(true); }
             showStatus(`Document "${title}" deleted.`, 'bg-red-600', 3000);
         } catch (error) {
             console.error("Error deleting document:", error);
@@ -481,60 +430,11 @@
         }
     }
 
-
-    /**
-     * Loads a document into the editor and switches view.
-     */
-    function loadDocument(id, title, content) {
-        currentDocId = id;
-        currentDocTitle = title;
-        document.getElementById('doc-title-input').value = title;
-        document.getElementById('document-editor').innerHTML = content;
-        updateCounters();
-        switchView('editor');
-        showStatus(`Loaded document: ${title}`, 'bg-indigo-600', 2000);
-    }
-
-    /**
-     * Creates a blank new document and switches view.
-     */
-    function newDocument(clearContent = true) {
-        currentDocId = null; // Mark as new document
-        currentDocTitle = `New Document - ${new Date().toLocaleString().split(',')[0]}`;
-        document.getElementById('doc-title-input').value = currentDocTitle;
-        // Reset color pickers
-        document.getElementById('foreColor').value = "#000000";
-        // NOTE: The 'backColor' element does not exist in the HTML, commenting out to prevent errors.
-        // document.getElementById('backColor').value = "#ffffff";
-        if (clearContent) {
-            document.getElementById('document-editor').innerHTML = '<p>Start your new masterpiece here...</p>';
-        }
-        updateCounters();
-        switchView('editor');
-        showStatus('New document initialized.', 'bg-green-500', 1500);
-    }
-
-    /**
-     * Saves the current document (or creates a new one).
-     */
-    async function saveDocument() {
-        if (!userId) {
-            showStatus('Authentication in progress. Please wait.', 'bg-yellow-600');
-            return;
-        }
-
+    async function saveDocumentFirebase() {
         const editorContent = document.getElementById('document-editor').innerHTML;
         const editorTitle = document.getElementById('doc-title-input').value.trim() || "Untitled Document";
         
-        const saveButton = document.getElementById('save-button');
-        const saveStatus = document.getElementById('save-status');
-
-        saveButton.disabled = true;
-        saveButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
-        saveStatus.classList.remove('hidden');
-        saveStatus.textContent = 'Saving...';
-        saveStatus.classList.remove('text-green-600', 'text-red-600');
-        saveStatus.classList.add('text-yellow-600');
+        if (!userId) { return; } // Should not happen in Canvas Mode
 
         const docData = {
             title: editorTitle,
@@ -557,24 +457,227 @@
             }
             
             currentDocTitle = editorTitle;
-            document.getElementById('doc-title-input').value = currentDocTitle; // Ensure cleaned title is set
+            return true; // Success
+        } catch (error) {
+            console.error("Error saving document:", error);
+            return false; // Failure
+        }
+    }
 
+    // --- DATA MANAGEMENT (Local Mode Fallback) ---
+
+    function getLocalDocuments() {
+        try {
+            const data = localStorage.getItem(LOCAL_STORAGE_KEY);
+            return data ? JSON.parse(data) : [];
+        } catch (e) {
+            console.error("Error retrieving from localStorage:", e);
+            return [];
+        }
+    }
+
+    function saveLocalDocuments(documents) {
+        try {
+            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(documents));
+        } catch (e) {
+            console.error("Error saving to localStorage:", e);
+            showStatus("Local storage limit reached. Cannot save more data.", 'bg-red-700');
+        }
+    }
+
+    function startDocumentListenerLocal() {
+        // Local mode doesn't have a real-time snapshot listener, so we just load and render immediately.
+        const documents = getLocalDocuments();
+        renderFileList(documents);
+    }
+
+    async function deleteDocumentLocal(id, title) {
+        let documents = getLocalDocuments();
+        documents = documents.filter(doc => doc.id !== id);
+        saveLocalDocuments(documents);
+
+        if (currentDocId === id) { newDocument(true); }
+        renderFileList(documents);
+        showStatus(`Document "${title}" deleted from local storage.`, 'bg-red-600', 3000);
+    }
+
+    async function saveDocumentLocal() {
+        const editorContent = document.getElementById('document-editor').innerHTML;
+        const editorTitle = document.getElementById('doc-title-input').value.trim() || "Untitled Document";
+        let documents = getLocalDocuments();
+
+        const docData = {
+            id: currentDocId || crypto.randomUUID(),
+            title: editorTitle,
+            content: editorContent,
+            updatedAt: new Date(), // Stored as Date object in local array
+        };
+        
+        let success = false;
+        if (currentDocId) {
+            // Update existing
+            const index = documents.findIndex(d => d.id === currentDocId);
+            if (index !== -1) {
+                documents[index] = docData;
+                success = true;
+            }
+        } else {
+            // Create new
+            documents.push(docData);
+            currentDocId = docData.id;
+            success = true;
+        }
+
+        if (success) {
+            // Sort by latest update time (descending)
+            documents.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+            saveLocalDocuments(documents);
+            currentDocTitle = editorTitle;
+            renderFileList(documents); // Re-render to show updated time/position
+            return true;
+        }
+        return false;
+    }
+
+
+    // --- COMMON DATA FUNCTIONS ---
+
+    /**
+     * Renders the list of documents in the File Manager View.
+     */
+    function renderFileList(documents) {
+        const list = document.getElementById('file-list');
+        list.innerHTML = '';
+        
+        if (documents.length === 0) {
+            list.innerHTML = `<p class="text-gray-500 text-center py-12 border border-dashed border-gray-300 rounded-xl">
+                <i class="fas fa-exclamation-circle mb-3 text-3xl"></i><br>
+                No saved documents yet. Click 'New' to start writing!
+            </p>`;
+            if (!currentDocId && currentView === 'files') {
+                newDocument(false);
+            }
+            return;
+        }
+
+        documents.forEach(doc => {
+            const item = document.createElement('div');
+            item.className = 'file-item group';
+            
+            // Format the updated time correctly for both Firestore Timestamp (Date type) and Local Mode (Date type)
+            const updatedTime = doc.updatedAt instanceof Date ? doc.updatedAt.toLocaleString() : (new Date()).toLocaleString();
+
+            // Document name, updated time, and load handler
+            const docInfo = document.createElement('div');
+            docInfo.className = "flex-1 mr-4 truncate";
+            // The content must be passed as a string to loadDocument
+            const contentString = encodeURIComponent(doc.content);
+
+            docInfo.innerHTML = `
+                <div onclick="loadDocument('${doc.id}', '${doc.title.replace(/'/g, "\\'")}', decodeURIComponent('${contentString}'))" class="font-bold text-lg text-indigo-700 hover:text-indigo-900 cursor-pointer">
+                    <i class="far fa-file-alt mr-2"></i> ${doc.title}
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                    <i class="far fa-clock mr-1"></i> Updated: ${updatedTime}
+                </div>
+            `;
+            item.appendChild(docInfo);
+
+            // Delete button
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'text-gray-400 hover:text-red-600 p-2 rounded-full transition-colors opacity-0 group-hover:opacity-100';
+            deleteBtn.innerHTML = '<i class="fas fa-trash-alt"></i>';
+            deleteBtn.title = `Delete ${doc.title}`;
+            deleteBtn.onclick = (e) => {
+                e.stopPropagation(); 
+                confirmDelete(doc.id, doc.title);
+            };
+            item.appendChild(deleteBtn);
+
+            list.appendChild(item);
+        });
+    }
+    
+    /**
+     * Deletes a document after confirmation.
+     */
+    function confirmDelete(id, title) {
+        if (window.confirm(`Are you sure you want to delete the document: "${title}"? This cannot be undone.`)) {
+            if (isLocalMode) {
+                deleteDocumentLocal(id, title);
+            } else {
+                deleteDocumentFirebase(id, title);
+            }
+        }
+    }
+
+    /**
+     * Loads a document into the editor and switches view.
+     */
+    function loadDocument(id, title, content) {
+        currentDocId = id;
+        currentDocTitle = title;
+        document.getElementById('doc-title-input').value = title;
+        document.getElementById('document-editor').innerHTML = content;
+        updateCounters();
+        switchView('editor');
+        showStatus(`Loaded document: ${title}`, 'bg-indigo-600', 2000);
+    }
+
+    /**
+     * Creates a blank new document and switches view.
+     */
+    function newDocument(clearContent = true) {
+        currentDocId = null; 
+        currentDocTitle = `New Document - ${new Date().toLocaleDateString()}`;
+        document.getElementById('doc-title-input').value = currentDocTitle;
+        document.getElementById('foreColor').value = "#000000";
+        if (clearContent) {
+            document.getElementById('document-editor').innerHTML = '<p>Start your new masterpiece here...</p>';
+        }
+        updateCounters();
+        switchView('editor');
+        showStatus('New document initialized.', 'bg-green-500', 1500);
+    }
+
+    /**
+     * Saves the current document (or creates a new one).
+     */
+    async function saveDocument() {
+        const saveButton = document.getElementById('save-button');
+        const saveStatus = document.getElementById('save-status');
+
+        saveButton.disabled = true;
+        saveButton.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i> Saving...';
+        saveStatus.classList.remove('hidden');
+        saveStatus.textContent = 'Saving...';
+        saveStatus.classList.remove('text-green-600', 'text-red-600');
+        saveStatus.classList.add('text-yellow-600');
+
+        let success = false;
+        
+        if (isLocalMode) {
+            success = await saveDocumentLocal();
+        } else {
+            success = await saveDocumentFirebase();
+        }
+
+        if (success) {
+            document.getElementById('doc-title-input').value = currentDocTitle; 
             saveStatus.textContent = 'Saved!';
             saveStatus.classList.remove('text-yellow-600');
             saveStatus.classList.add('text-green-600');
-            showStatus(`Document "${editorTitle}" saved successfully!`, 'bg-green-700', 2000);
-
-        } catch (error) {
-            console.error("Error saving document:", error);
+            showStatus(`Document "${currentDocTitle}" saved successfully!`, 'bg-green-700', 2000);
+        } else {
             saveStatus.textContent = 'Save Failed!';
-            saveStatus.classList.remove('text-green-600');
+            saveStatus.classList.remove('text-yellow-600', 'text-green-600');
             saveStatus.classList.add('text-red-600');
             showStatus(`Failed to save document. Check console.`, 'bg-red-700', 4000);
-        } finally {
-            saveButton.disabled = false;
-            saveButton.innerHTML = '<i class="fas fa-save mr-1"></i> <span class="hidden sm:inline">Save</span>';
-            setTimeout(() => saveStatus.classList.add('hidden'), 3000);
         }
+        
+        saveButton.disabled = false;
+        saveButton.innerHTML = '<i class="fas fa-save mr-1"></i> <span class="hidden sm:inline">Save</span>';
+        setTimeout(() => saveStatus.classList.add('hidden'), 3000);
     }
 
     // Auto-save logic (debounced)
@@ -587,17 +690,25 @@
      * Initializes the document editor and sets up event listeners.
      */
     function initializeScriptoriam() {
-        // --- Dependency Assignment MUST happen first to avoid Error 1 ---
         const dependencies = window.firebaseDependencies;
-        if (dependencies) {
-            // Assign global Firebase function variables
-            ({ initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, deleteDoc, addDoc, setDoc, onSnapshot, collection, query, orderBy } = dependencies);
-            initializeFirebase(); // Start Firebase services and auth listener
+        if (!dependencies) {
+            // If the module script failed to load dependencies (very rare), we force local mode.
+            isLocalMode = true;
+            console.warn("Firebase dependencies failed to load. Running in Local Mode.");
         } else {
-             console.error("CRITICAL ERROR: Firebase dependencies not available. App cannot function.");
+             // Assign dependencies only if they loaded
+            ({ initializeApp, getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, getFirestore, doc, deleteDoc, addDoc, setDoc, onSnapshot, collection, query, orderBy } = dependencies);
         }
-        // -----------------------------------------------------------------
 
+
+        if (isCanvasEnvironment && !isLocalMode) {
+            initializeFirebase(); // Start in secure Firebase mode
+        } else {
+            // Start in Local Mode for external hosting (GitHub Pages)
+            isLocalMode = true;
+            document.getElementById('auth-status').innerHTML = '<i class="fas fa-desktop text-green-500 mr-1"></i> **Local Mode Active** (Saved in Browser)';
+            startDocumentListenerLocal();
+        }
 
         const editor = document.getElementById('document-editor');
         const titleInput = document.getElementById('doc-title-input');
@@ -643,14 +754,17 @@
 
     function exportAs(format) {
         document.getElementById('export-menu').classList.add('hidden');
-        const title = document.getElementById('doc-title-input').value || "Scriptoriam_Document";
+        const title = document.getElementById('doc-title-input').value || "Untitled_Document";
+        
+        // **NEW: Prefix the filename**
+        const filenamePrefix = "Scriptoriam Document - ";
 
         switch (format) {
-            case 'txt': exportAsTxt(title); break;
-            case 'html': exportAsHtml(title); break;
-            case 'docx': exportAsDocx(title); break;
-            case 'pdf': exportAsPdf(title); break;
-            case 'bat': exportAsBat(title); break;
+            case 'txt': exportAsTxt(title, filenamePrefix); break;
+            case 'html': exportAsHtml(title, filenamePrefix); break;
+            case 'docx': exportAsDocx(title, filenamePrefix); break;
+            case 'pdf': exportAsPdf(title, filenamePrefix); break;
+            case 'bat': exportAsBat(title, filenamePrefix); break;
             default: showStatus(`Unknown export format: ${format}`, 'bg-red-500');
         }
     }
@@ -661,12 +775,12 @@
         showStatus(`Successfully downloaded ${filename}!`, 'bg-green-600', 2500);
     }
 
-    function exportAsTxt(title) {
+    function exportAsTxt(title, prefix) {
         const content = document.getElementById('document-editor').textContent;
-        downloadFile(`${title}.txt`, content, 'text/plain;charset=utf-8');
+        downloadFile(`${prefix}${title}.txt`, content, 'text/plain;charset=utf-8');
     }
 
-    function exportAsHtml(title) {
+    function exportAsHtml(title, prefix) {
         const content = `
 <!DOCTYPE html>
 <html lang="en">
@@ -686,10 +800,10 @@
     ${document.getElementById('document-editor').innerHTML}
 </body>
 </html>`;
-        downloadFile(`${title}.html`, content, 'text/html;charset=utf-8');
+        downloadFile(`${prefix}${title}.html`, content, 'text/html;charset=utf-8');
     }
 
-    function exportAsDocx(title) {
+    function exportAsDocx(title, prefix) {
         const htmlContent = `
 <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
 <head>
@@ -703,16 +817,15 @@
     ${document.getElementById('document-editor').innerHTML}
 </body>
 </html>`;
-        downloadFile(`${title}.doc`, htmlContent, 'application/msword;charset=utf-8');
+        downloadFile(`${prefix}${title}.doc`, htmlContent, 'application/msword;charset=utf-8');
     }
 
-    async function exportAsPdf(title) {
+    async function exportAsPdf(title, prefix) {
         showStatus('Generating PDF... please wait.', 'bg-yellow-500', 5000);
         
         const { jsPDF } = window.jspdf;
         const editor = document.getElementById('document-editor');
         
-        // Temporarily adjust padding for the screenshot, then restore
         const originalPadding = editor.style.padding;
         editor.style.padding = '50px'; 
 
@@ -738,18 +851,17 @@
                 heightLeft -= pageHeight;
             }
 
-            pdf.save(`${title}.pdf`);
+            pdf.save(`${prefix}${title}.pdf`);
             showStatus('PDF successfully created!', 'bg-green-600', 2500);
         } catch (e) {
-             editor.style.padding = originalPadding; // Ensure padding is restored on error
+             editor.style.padding = originalPadding; 
              console.error("PDF generation failed:", e);
              showStatus('PDF generation failed. Try exporting as DOCX.', 'bg-red-700', 4000);
         }
     }
 
-    function exportAsBat(title) {
+    function exportAsBat(title, prefix) {
         const cleanContent = document.getElementById('document-editor').textContent.split('\n').map(line => {
-            // Escape special characters for batch script
             let escapedLine = line.replace(/&/g, '^&').replace(/\|/g, '^|').replace(/>/g, '^>').replace(/</g, '^<');
             return `echo ${escapedLine}`;
         }).join('\r\n');
@@ -765,7 +877,7 @@ echo ========================================================
 echo.
 pause
 exit`;
-        downloadFile(`${title}.bat`, batContent, 'text/x-batch;charset=us-ascii');
+        downloadFile(`${prefix}${title}.bat`, batContent, 'text/x-batch;charset=us-ascii');
     }
 
     // Initialize the application once the window loads
